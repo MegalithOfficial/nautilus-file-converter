@@ -35,7 +35,16 @@ class ImageConverter(BaseConverter):
             return False
 
         mime_type = file_info.get_mime_type()
-        return bool(mime_type and mime_type.startswith("image/"))
+        if mime_type and mime_type.startswith("image/"):
+            return True
+
+        name = file_info.get_name() if hasattr(file_info, "get_name") else None
+        if name:
+            ext = os.path.splitext(name)[1].lstrip(".").lower()
+            if ext == "gif":
+                return True
+
+        return False
 
     def convert(self, input_path, output_path, target):
         cmd = commands.build_magick_command(input_path, output_path, quality=target.quality)

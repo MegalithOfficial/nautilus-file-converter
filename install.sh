@@ -43,6 +43,14 @@ else
     echo "ImageMagick found."
 fi
 
+echo "Checking ffmpeg..."
+if ! has_cmd ffmpeg; then
+    echo "ffmpeg not found."
+    install_pkg ffmpeg
+else
+    echo "ffmpeg found."
+fi
+
 echo "Installing Nautilus extension files..."
 
 mkdir -p "${EXT_DIR}"

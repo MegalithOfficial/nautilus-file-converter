@@ -66,6 +66,48 @@ def build_magick_strip_command(input_path, output_path):
     return [binary, input_path, "-strip", output_path]
 
 
+def build_ffmpeg_command(input_path, output_path):
+    """
+    Build an ffmpeg command for video to audio/GIF conversions.
+
+    Args:
+        input_path: Source video path
+        output_path: Destination path
+
+    Returns:
+        Command array or None if ffmpeg not found
+    """
+    binary = find_executable(["ffmpeg"])
+    if not binary:
+        return None
+
+    ext = output_path.lower().split(".")[-1]
+    cmd = [binary, "-i", input_path]
+
+    if ext == "mp3":
+        cmd.extend(["-vn", "-c:a", "libmp3lame", "-q:a", "2"])
+    elif ext in ["m4a", "aac"]:
+        cmd.extend(["-vn", "-c:a", "aac", "-b:a", "192k"])
+    elif ext == "wav":
+        cmd.extend(["-vn", "-c:a", "pcm_s16le"])
+    elif ext == "flac":
+        cmd.extend(["-vn", "-c:a", "flac"])
+    elif ext == "ogg":
+        cmd.extend(["-vn", "-c:a", "libvorbis", "-q:a", "5"])
+    elif ext == "opus":
+        cmd.extend(["-vn", "-c:a", "libopus", "-b:a", "128k"])
+    elif ext == "gif":
+        cmd.extend([
+            "-filter_complex",
+            "fps=12,scale=iw:-1:flags=lanczos,split[s0][s1];"
+            "[s0]palettegen[p];[s1][p]paletteuse",
+            "-loop", "0",
+        ])
+
+    cmd.append(output_path)
+    return cmd
+
+
 def run_command_async(args, on_success=None, on_error=None):
     def _run():
         result = subprocess.run(
