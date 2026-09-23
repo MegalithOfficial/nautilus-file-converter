@@ -2,6 +2,7 @@
 set -euo pipefail
 
 EXT_DIR="${HOME}/.local/share/nautilus-python/extensions"
+cd "$(dirname "$(readlink -f "$0")")"
 DRY_RUN=false
 
 if [[ "${1:-}" == "--dry-install" ]]; then
@@ -36,7 +37,7 @@ install_pkg() {
 }
 
 echo "Checking ImageMagick..."
-if ! has_cmd convert; then
+if ! has_cmd magick && ! has_cmd convert; then
     echo "ImageMagick not found."
     install_pkg imagemagick
 else
