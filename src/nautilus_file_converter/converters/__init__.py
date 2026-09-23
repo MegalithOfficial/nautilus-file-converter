@@ -1,1 +1,1 @@
-__all__ = ["base", "image", "video"] # type: ignore
+__all__ = ["audio", "base", "document", "image", "video"]  # type: ignore

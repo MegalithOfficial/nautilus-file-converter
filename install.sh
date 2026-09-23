@@ -52,6 +52,14 @@ else
     echo "ffmpeg found."
 fi
 
+for optional in soffice zenity notify-send; do
+    if ! has_cmd "$optional"; then
+        echo "Optional: $optional not found."
+    fi
+done
+has_cmd soffice || echo "  Install LibreOffice to convert documents."
+has_cmd zenity || echo "  Install zenity for progress windows with a cancel button."
+
 echo "Installing Nautilus extension files..."
 
 mkdir -p "${EXT_DIR}"
@@ -64,6 +72,7 @@ cp -f "src/nautilus_file_converter_extension.py" \
 
 cp -R "src/nautilus_file_converter" \
       "${EXT_DIR}/nautilus_file_converter"
+find "${EXT_DIR}/nautilus_file_converter" -name __pycache__ -type d -prune -exec rm -rf {} +
 
 echo "Installed Nautilus File Converter to ${EXT_DIR}"
 

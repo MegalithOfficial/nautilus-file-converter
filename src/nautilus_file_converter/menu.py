@@ -1,163 +1,93 @@
 import os
 
-from gi.repository import Nautilus # type: ignore
+from gi.repository import Nautilus  # type: ignore
 
-from nautilus_file_converter import commands, notify, output, registry
+from nautilus_file_converter import jobs, notify, registry
+from nautilus_file_converter.converters.base import Action, Submenu
 
 
 _MENU_PREFIX = "NautilusFileConverter"
 
 
 def build_menu_items(file_infos):
-    converters = registry.get_converters()
-    eligible = [
-        converter
-        for converter in converters
-        if any(converter.supports(info) for info in file_infos)
-    ]
-    has_images = any(_is_image(info) for info in file_infos)
-    if not eligible and not has_images:
+    groups = []
+    for converter in registry.get_converters():
+        matching = [info for info in file_infos if converter.supports(info)]
+        if matching:
+            groups.append((converter, matching))
+
+    if not groups:
         return []
 
     items = []
-    top_item = Nautilus.MenuItem(
-        name=f"{_MENU_PREFIX}::ConvertTo",
-        label="Convert To",
-        tip="Convert selected files",
-    )
-    top_menu = Nautilus.Menu()
+    for kind, label, getter in [
+        ("convert", "Convert To", lambda c, infos: c.convert_items(infos)),
+        ("tools", "Tools", lambda c, infos: c.tool_items(infos)),
+    ]:
+        sections = []
+        for converter, matching in groups:
+            children = getter(converter, matching)
+            if children:
+                sections.append((converter, matching, children))
 
-    for converter in eligible:
-        converter_item = Nautilus.MenuItem(
-            name=f"{_MENU_PREFIX}::{converter.converter_id}",
-            label=converter.label,
-            tip=f"Convert files using {converter.label}",
-        )
-        converter_menu = Nautilus.Menu()
+        if not sections:
+            continue
 
-        format_groups = _group_targets_by_format(converter.targets)
+        top = Nautilus.MenuItem(name=f"{_MENU_PREFIX}::{kind}", label=label, tip="")
+        submenu = Nautilus.Menu()
 
-        for format_name, targets in format_groups.items():
-            if len(targets) == 1:
-                target = targets[0]
-                target_item = Nautilus.MenuItem(
-                    name=f"{_MENU_PREFIX}::{converter.converter_id}-{target.name}",
-                    label=target.label,
-                    tip=f"Convert to {target.label}",
+        if len(sections) == 1:
+            converter, matching, children = sections[0]
+            _append(submenu, f"{kind}-{converter.converter_id}", children, matching)
+        else:
+            # Mixed selection: one submenu per file kind, each acting only
+            # on the files of that kind.
+            for converter, matching, children in sections:
+                path = f"{kind}-{converter.converter_id}"
+                item = Nautilus.MenuItem(
+                    name=f"{_MENU_PREFIX}::{path}",
+                    label=f"{converter.label} ({len(matching)})",
+                    tip="",
                 )
-                target_item.connect(
-                    "activate",
-                    _on_convert_activate,
-                    converter,
-                    target,
-                    file_infos,
-                )
-                converter_menu.append_item(target_item)
-            else:
-                format_item = Nautilus.MenuItem(
-                    name=f"{_MENU_PREFIX}::{converter.converter_id}-{format_name}",
-                    label=targets[0].label.split(" (")[0],
-                    tip=f"Convert to {format_name.upper()}",
-                )
-                format_submenu = Nautilus.Menu()
+                inner = Nautilus.Menu()
+                _append(inner, path, children, matching)
+                item.set_submenu(inner)
+                submenu.append_item(item)
 
-                for target in targets:
-                    quality_item = Nautilus.MenuItem(
-                        name=f"{_MENU_PREFIX}::{converter.converter_id}-{target.name}",
-                        label=target.label.split(" (")[1].rstrip(")") if " (" in target.label else target.label,
-                        tip=f"Convert to {target.label}",
-                    )
-                    quality_item.connect(
-                        "activate",
-                        _on_convert_activate,
-                        converter,
-                        target,
-                        file_infos,
-                    )
-                    format_submenu.append_item(quality_item)
-
-                format_item.set_submenu(format_submenu)
-                converter_menu.append_item(format_item)
-
-        converter_item.set_submenu(converter_menu)
-        top_menu.append_item(converter_item)
-
-    top_item.set_submenu(top_menu)
-    if eligible:
-        items.append(top_item)
-
-    if has_images:
-        strip_item = Nautilus.MenuItem(
-            name=f"{_MENU_PREFIX}::StripMetadata",
-            label="Strip Metadata",
-            tip="Remove metadata from selected images",
-        )
-        strip_item.connect("activate", _on_strip_metadata_activate, file_infos)
-        items.append(strip_item)
+        top.set_submenu(submenu)
+        items.append(top)
 
     return items
 
 
-def _group_targets_by_format(targets):
-    """Group conversion targets by their base format (extension)."""
-    groups = {}
-    for target in targets:
-        base_format = target.extension
-        if base_format not in groups:
-            groups[base_format] = []
-        groups[base_format].append(target)
-    return groups
+def _append(menu, path, nodes, file_infos):
+    for node in nodes:
+        node_path = f"{path}-{node.name}"
+        item = Nautilus.MenuItem(
+            name=f"{_MENU_PREFIX}::{node_path}",
+            label=node.label,
+            tip="",
+        )
+
+        if isinstance(node, Submenu):
+            inner = Nautilus.Menu()
+            _append(inner, node_path, node.children, file_infos)
+            item.set_submenu(inner)
+        elif isinstance(node, Action):
+            item.connect("activate", _on_activate, node, file_infos)
+
+        menu.append_item(item)
 
 
-def _on_convert_activate(menu_item, converter, target, file_infos):
-    for info in file_infos:
-        if converter.supports(info):
-            converter.request_convert(info, target)
-
-
-def _on_strip_metadata_activate(menu_item, file_infos):
-    for info in file_infos:
-        if not _is_image(info):
-            continue
-
-        input_path = _get_local_path(info)
-        if not input_path:
-            notify.notify_error("Metadata strip failed", "Selected file is not local")
-            continue
-
-        output_path = output.build_suffixed_output_path(input_path, "stripped")
-        cmd = commands.build_magick_strip_command(input_path, output_path)
-        if not cmd:
-            output.discard(output_path)
-            notify.notify_error(
-                "Metadata strip failed",
-                "ImageMagick not found. Install magick or convert.",
-            )
-            return
-
-        def _on_success(input_path=input_path, output_path=output_path):
-            notify.notify_success(
-                "Metadata stripped",
-                _format_paths(input_path, output_path),
-            )
-
-        def _on_error(message, output_path=output_path):
-            output.discard(output_path)
-            notify.notify_error("Metadata strip failed", message)
-
-        commands.run_command_async(cmd, on_success=_on_success, on_error=_on_error)
-
-
-def _format_paths(input_path, output_path):
-    return f"{os.path.basename(input_path)} -> {os.path.basename(output_path)}"
-
-
-def _is_image(file_info):
-    if file_info.is_directory():
-        return False
-
-    mime_type = file_info.get_mime_type()
-    return bool(mime_type and mime_type.startswith("image/"))
+def _on_activate(_menu_item, action, file_infos):
+    paths = [path for path in map(_get_local_path, file_infos) if path]
+    skipped = len(file_infos) - len(paths)
+    if skipped:
+        notify.notify_error(
+            f"{action.done}: skipped {skipped} file(s)",
+            "Only local files can be converted.",
+        )
+    jobs.run(action, paths)
 
 
 def _get_local_path(file_info):

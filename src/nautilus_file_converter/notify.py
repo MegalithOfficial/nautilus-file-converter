@@ -33,12 +33,19 @@ def _spawn(args, flags=Gio.SubprocessFlags.NONE):
 
 
 class Progress:
-    """A zenity progress window fed through a pipe, or a no-op without zenity."""
+    """
+    A zenity progress window fed through a pipe, or a no-op without zenity.
 
-    def __init__(self, title, text, pulsate=False):
+    on_cancel is called if the user closes the window or presses Cancel
+    before close() is called.
+    """
+
+    def __init__(self, title, text, pulsate=False, on_cancel=None):
         self._proc = None
         self._stdin = None
         self._text = text
+        self._closed = False
+        self._on_cancel = on_cancel
 
         if not shutil.which("zenity"):
             return
@@ -47,23 +54,31 @@ class Progress:
             "zenity", "--progress",
             "--title", title,
             "--text", text,
-            "--no-cancel",
             "--auto-close",
+            "--width", "360",
         ]
+        if not on_cancel:
+            args.append("--no-cancel")
         args.append("--pulsate" if pulsate else "--percentage=0")
 
         self._proc = _spawn(args, Gio.SubprocessFlags.STDIN_PIPE)
         if self._proc:
             self._stdin = self._proc.get_stdin_pipe()
+            self._proc.wait_async(None, self._on_exit)
 
     def update(self, percent=None, text=None):
         if percent is not None:
-            self._write(f"{int(percent)}\n")
+            # 100 would trigger --auto-close before the job is really done.
+            self._write(f"{min(99, int(percent))}\n")
         if text:
             # zenity replaces the whole label, so keep the original text on top.
-            self._write(f"# {self._text}\n{text}\n".replace("\n", "\\n", 1))
+            self._write(f"# {self._text}\\n{text}\n")
 
     def close(self):
+        if self._closed:
+            return
+
+        self._closed = True
         self._write("100\n")
         if self._stdin:
             try:
@@ -74,6 +89,21 @@ class Progress:
         if self._proc:
             self._proc.force_exit()
             self._proc = None
+
+    def _on_exit(self, proc, result):
+        try:
+            proc.wait_finish(result)
+        except GLib.Error:
+            pass
+
+        if self._closed:
+            return
+
+        self._closed = True
+        self._stdin = None
+        self._proc = None
+        if self._on_cancel:
+            self._on_cancel()
 
     def _write(self, text):
         if not self._stdin:

@@ -1,4 +1,5 @@
 import collections
+import functools
 import re
 import shutil
 
@@ -9,123 +10,20 @@ from gi.repository import Gio, GLib  # type: ignore
 # barely run inside it. Everything here uses Gio.Subprocess and async reads
 # instead, which keeps all callbacks on the GLib main loop.
 
-_SINGLE_FRAME_EXTENSIONS = {"jpg", "jpeg", "png", "bmp", "ico", "heic"}
 _PROGRESS_LINE = re.compile(r"^[a-z0-9_]+=")
 _ACTIVE = set()
 
 
-def find_executable(candidates):
+@functools.lru_cache(maxsize=None)
+def find_executable(*candidates):
     for candidate in candidates:
         if shutil.which(candidate):
             return candidate
     return None
 
 
-def _extension(path):
-    return path.lower().rsplit(".", 1)[-1]
-
-
-def build_magick_command(input_path, output_path, quality=85):
-    """
-    Build an ImageMagick command for a single conversion.
-
-    Returns None if ImageMagick is not installed.
-    """
-    binary = find_executable(["magick", "convert"])
-    if not binary:
-        return None
-
-    ext = _extension(output_path)
-
-    # Animated or multi-page input would otherwise be split into
-    # name-0.jpg, name-1.jpg, ... for formats that hold one frame.
-    source = f"{input_path}[0]" if ext in _SINGLE_FRAME_EXTENSIONS else input_path
-
-    cmd = [binary, source, "-auto-orient", "-quality", str(quality)]
-
-    if ext in ["jpg", "jpeg"]:
-        cmd.extend(["-interlace", "Plane"])
-    elif ext == "png":
-        cmd.extend(["-define", "png:compression-level=6"])
-    elif ext == "webp":
-        cmd.extend(["-define", "webp:method=4"])
-    elif ext == "avif":
-        cmd.extend(["-define", "avif:speed=6"])
-    elif ext == "ico":
-        # ICO frames are capped at 256x256.
-        cmd.extend(["-resize", "256x256>"])
-
-    cmd.append(output_path)
-    return cmd
-
-
-def build_magick_strip_command(input_path, output_path):
-    binary = find_executable(["magick", "convert"])
-    if not binary:
-        return None
-
-    return [binary, input_path, "-strip", output_path]
-
-
-def build_ffmpeg_command(input_path, output_path):
-    """
-    Build an ffmpeg command for video to audio/GIF conversions.
-
-    Progress is written to stdout as key=value lines, errors to stderr.
-    Returns None if ffmpeg is not installed.
-    """
-    binary = find_executable(["ffmpeg"])
-    if not binary:
-        return None
-
-    ext = _extension(output_path)
-    cmd = [
-        binary,
-        "-hide_banner",
-        "-nostdin",
-        "-y",
-        "-v", "error",
-        "-progress", "pipe:1",
-        "-nostats",
-        "-i", input_path,
-    ]
-
-    if ext == "mp3":
-        cmd.extend(["-vn", "-c:a", "libmp3lame", "-q:a", "2"])
-    elif ext in ["m4a", "aac"]:
-        cmd.extend(["-vn", "-c:a", "aac", "-b:a", "192k"])
-    elif ext == "wav":
-        cmd.extend(["-vn", "-c:a", "pcm_s16le"])
-    elif ext == "flac":
-        cmd.extend(["-vn", "-c:a", "flac"])
-    elif ext == "ogg":
-        cmd.extend(["-vn", "-c:a", "libvorbis", "-q:a", "5"])
-    elif ext == "opus":
-        cmd.extend(["-vn", "-c:a", "libopus", "-b:a", "128k"])
-    elif ext == "gif":
-        cmd.extend([
-            "-filter_complex",
-            "fps=12,scale=w='min(640,iw)':h=-2:flags=lanczos,split[s0][s1];"
-            "[s0]palettegen[p];[s1][p]paletteuse",
-            "-loop", "0",
-        ])
-
-    cmd.append(output_path)
-    return cmd
-
-
-def build_ffprobe_duration_command(input_path):
-    binary = find_executable(["ffprobe"])
-    if not binary:
-        return None
-
-    return [
-        binary,
-        "-v", "error",
-        "-show_entries", "format=duration",
-        "-of", "default=noprint_wrappers=1:nokey=1",
-        input_path,
-    ]
+def has_executable(*candidates):
+    return find_executable(*candidates) is not None
 
 
 def run_command_async(args, on_success=None, on_error=None, on_line=None):
@@ -135,6 +33,8 @@ def run_command_async(args, on_success=None, on_error=None, on_line=None):
     stderr is merged into stdout and read line by line. on_line(line) may
     return True to consume a line; unconsumed lines are kept and the last
     few are passed to on_error(message) on failure.
+
+    Returns the Gio.Subprocess, or None if it could not be started.
     """
     try:
         proc = Gio.Subprocess.new(
@@ -143,7 +43,7 @@ def run_command_async(args, on_success=None, on_error=None, on_line=None):
         )
     except GLib.Error as exc:
         _call(on_error, exc.message)
-        return
+        return None
 
     stream = proc.get_stdout_pipe()
     job = (proc, stream)
@@ -185,10 +85,15 @@ def run_command_async(args, on_success=None, on_error=None, on_line=None):
         if proc.get_successful():
             _call(on_success)
         else:
-            message = "\n".join(tail) or f"Exited with status {proc.get_exit_status()}"
+            if proc.get_if_exited():
+                status = f"Exited with status {proc.get_exit_status()}"
+            else:
+                status = f"Killed by signal {proc.get_term_sig()}"
+            message = "\n".join(tail) or status
             _call(on_error, message)
 
     stream.read_bytes_async(8192, GLib.PRIORITY_DEFAULT, None, _on_read)
+    return proc
 
 
 def run_ffmpeg_async(args, duration, on_progress=None, on_success=None, on_error=None):
@@ -208,15 +113,23 @@ def run_ffmpeg_async(args, duration, on_progress=None, on_success=None, on_error
             on_progress(percent, elapsed)
         return True
 
-    run_command_async(args, on_success=on_success, on_error=on_error, on_line=_on_line)
+    return run_command_async(args, on_success=on_success, on_error=on_error, on_line=_on_line)
 
 
 def probe_duration_async(input_path, callback):
     """Call callback(seconds) with the media duration, or None if unknown."""
-    cmd = build_ffprobe_duration_command(input_path)
-    if not cmd:
+    binary = find_executable("ffprobe")
+    if not binary:
         callback(None)
         return
+
+    cmd = [
+        binary,
+        "-v", "error",
+        "-show_entries", "format=duration",
+        "-of", "default=noprint_wrappers=1:nokey=1",
+        input_path,
+    ]
 
     lines = []
 

@@ -1,1 +1,1 @@
-__all__ = ["extension", "menu", "registry", "commands", "output", "notify", "converters"] # type: ignore
+__all__ = ["extension", "menu", "registry", "commands", "jobs", "output", "notify", "converters"]  # type: ignore

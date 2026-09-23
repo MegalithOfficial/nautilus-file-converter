@@ -1,108 +1,125 @@
-import os
+from nautilus_file_converter import commands
+from nautilus_file_converter.converters.audio import AUDIO_EXTENSIONS, AUDIO_FORMATS, ffmpeg_base
+from nautilus_file_converter.converters.base import (
+    FFMPEG,
+    Action,
+    BaseConverter,
+    Submenu,
+    file_extension,
+    mime_type,
+    shared_extension,
+)
 
-from nautilus_file_converter import commands, notify, output
-from nautilus_file_converter.converters.base import BaseConverter, ConversionTarget
+
+_H264 = [
+    "-c:v", "libx264", "-preset", "medium", "-pix_fmt", "yuv420p",
+    "-c:a", "aac", "-b:a", "160k", "-movflags", "+faststart",
+]
+
+# x264 needs even dimensions.
+_EVEN = "scale=trunc(iw/2)*2:trunc(ih/2)*2"
+
+# (extension, label, args, done)
+_VIDEO_FORMATS = [
+    ("mp4", "MP4 (H.264)", ["-vf", _EVEN, "-crf", "20", *_H264], "Converted to MP4"),
+    ("webm", "WebM (VP9)", [
+        "-c:v", "libvpx-vp9", "-crf", "32", "-b:v", "0", "-row-mt", "1",
+        "-deadline", "good", "-cpu-used", "4",
+        "-c:a", "libopus", "-b:a", "128k",
+    ], "Converted to WebM"),
+    ("mkv", "MKV (no re-encode)", ["-map", "0", "-c", "copy"], "Remuxed to MKV"),
+]
+
+# (key, label, short side limit, crf)
+_COMPRESS = [
+    ("1080", "Smaller (1080p)", 1080, 26),
+    ("720", "Much Smaller (720p)", 720, 29),
+    ("480", "Tiny (480p)", 480, 32),
+]
 
 
 class VideoConverter(BaseConverter):
     converter_id = "video"
-    label = "Video Formats"
+    label = "Video"
 
-    targets = [
-        ConversionTarget("mp3", "MP3 (Audio)", "mp3"),
-        ConversionTarget("m4a", "M4A (Audio)", "m4a"),
-        ConversionTarget("wav", "WAV (Audio)", "wav"),
-        ConversionTarget("flac", "FLAC (Audio)", "flac"),
-        ConversionTarget("ogg", "OGG (Audio)", "ogg"),
-        ConversionTarget("opus", "Opus (Audio)", "opus"),
-        ConversionTarget("gif", "GIF (Animated)", "gif"),
-    ]
+    def available(self):
+        return commands.has_executable("ffmpeg")
 
     def supports(self, file_info) -> bool:
-        if file_info.is_directory():
+        if not mime_type(file_info).startswith("video/"):
             return False
+        ext = file_extension(file_info)
+        return ext not in AUDIO_EXTENSIONS and ext != "gif"
 
-        mime_type = file_info.get_mime_type()
-        if not (mime_type and mime_type.startswith("video/")):
-            return False
-
-        name = file_info.get_name() if hasattr(file_info, "get_name") else None
-        if name:
-            ext = os.path.splitext(name)[1].lstrip(".").lower()
-            if ext in _AUDIO_EXTENSIONS or ext == "gif":
-                return False
-
-        return True
-
-    def convert(self, input_path, output_path, target):
-        cmd = commands.build_ffmpeg_command(input_path, output_path)
-        if not cmd:
-            output.discard(output_path)
-            notify.notify_error(
-                "Video conversion failed",
-                "ffmpeg not found. Install ffmpeg.",
-            )
-            return
-
-        commands.probe_duration_async(
-            input_path,
-            lambda duration: self._start(cmd, duration, input_path, output_path, target),
+    def convert_items(self, file_infos):
+        current = shared_extension(file_infos)
+        video = [
+            _action(f"to-{ext}", label, args, done, extension=ext)
+            for ext, label, args, done in _VIDEO_FORMATS
+            if ext != current
+        ]
+        gif = _action(
+            "to-gif",
+            "Animated GIF",
+            [
+                "-filter_complex",
+                "fps=12,scale=w='min(640,iw)':h='min(640,ih)'"
+                ":force_original_aspect_ratio=decrease:flags=lanczos,split[s0][s1];"
+                "[s0]palettegen[p];[s1][p]paletteuse",
+                "-loop", "0",
+            ],
+            "Converted to GIF",
+            extension="gif",
         )
+        audio = Submenu("extract-audio", "Extract Audio", [
+            _action(f"audio-{ext}", label, ["-vn", "-map", "0:a:0", *codec], f"Extracted audio ({label})", extension=ext)
+            for ext, label, codec in AUDIO_FORMATS
+        ])
+        return [*video, gif, audio]
 
-    def _start(self, cmd, duration, input_path, output_path, target):
-        progress = notify.Progress(
-            "Converting video",
-            f"{os.path.basename(input_path)} -> {target.label}",
-            pulsate=duration is None,
-        )
-
-        def _on_progress(percent, elapsed):
-            if duration:
-                text = f"{_format_time(elapsed)} / {_format_time(duration)}"
-            else:
-                text = _format_time(elapsed)
-            progress.update(percent, text)
-
-        def _on_success():
-            progress.close()
-            notify.notify_success(
-                f"Converted to {target.label}",
-                _format_paths(input_path, output_path),
-            )
-
-        def _on_error(message):
-            progress.close()
-            output.discard(output_path)
-            notify.notify_error(f"Video conversion failed ({target.label})", message)
-
-        commands.run_ffmpeg_async(
-            cmd,
-            duration,
-            on_progress=_on_progress,
-            on_success=_on_success,
-            on_error=_on_error,
-        )
+    def tool_items(self, file_infos):
+        return [
+            Submenu("compress", "Compress", [
+                _action(
+                    f"compress-{key}",
+                    label,
+                    ["-vf", _fit_short_side(limit), "-crf", str(crf), *_H264],
+                    f"Compressed ({label})",
+                    extension="mp4",
+                    suffix=f"{key}p",
+                )
+                for key, label, limit, crf in _COMPRESS
+            ]),
+            _action(
+                "mute",
+                "Remove Audio",
+                ["-map", "0", "-map", "-0:a", "-c", "copy"],
+                "Audio removed",
+                suffix="muted",
+            ),
+        ]
 
 
-def _format_paths(input_path, output_path):
-    return f"{os.path.basename(input_path)} -> {os.path.basename(output_path)}"
+def _fit_short_side(limit):
+    # Scale the shorter side down to `limit`, never up, keeping both even.
+    return (
+        f"scale='if(gte(iw,ih),-2,trunc(min({limit},iw)/2)*2)'"
+        f":'if(gte(iw,ih),trunc(min({limit},ih)/2)*2,-2)'"
+    )
 
 
-def _format_time(seconds):
-    total_seconds = max(0, int(seconds))
-    minutes, secs = divmod(total_seconds, 60)
-    hours, minutes = divmod(minutes, 60)
-    if hours:
-        return f"{hours:d}:{minutes:02d}:{secs:02d}"
-    return f"{minutes:d}:{secs:02d}"
+def _action(name, label, args, done, extension=None, suffix=None):
+    def build(input_path, output_path, _workdir):
+        return [*ffmpeg_base(input_path), *args, output_path]
 
-
-_AUDIO_EXTENSIONS = {
-    "aac",
-    "flac",
-    "m4a",
-    "mp3",
-    "ogg",
-    "opus",
-    "wav",
-}
+    return Action(
+        name,
+        label,
+        build,
+        done,
+        extension=extension,
+        suffix=suffix,
+        runner=FFMPEG,
+        queue="heavy",
+        progress=True,
+    )
