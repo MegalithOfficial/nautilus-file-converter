@@ -1,6 +1,6 @@
 import os
 
-from nautilus_file_converter import commands, notify
+from nautilus_file_converter import commands, notify, output
 from nautilus_file_converter.converters.base import BaseConverter, ConversionTarget
 
 
@@ -37,30 +37,64 @@ class VideoConverter(BaseConverter):
     def convert(self, input_path, output_path, target):
         cmd = commands.build_ffmpeg_command(input_path, output_path)
         if not cmd:
+            output.discard(output_path)
             notify.notify_error(
                 "Video conversion failed",
                 "ffmpeg not found. Install ffmpeg.",
             )
             return
 
+        commands.probe_duration_async(
+            input_path,
+            lambda duration: self._start(cmd, duration, input_path, output_path, target),
+        )
+
+    def _start(self, cmd, duration, input_path, output_path, target):
+        progress = notify.Progress(
+            "Converting video",
+            f"{os.path.basename(input_path)} -> {target.label}",
+            pulsate=duration is None,
+        )
+
+        def _on_progress(percent, elapsed):
+            if duration:
+                text = f"{_format_time(elapsed)} / {_format_time(duration)}"
+            else:
+                text = _format_time(elapsed)
+            progress.update(percent, text)
+
         def _on_success():
+            progress.close()
             notify.notify_success(
                 f"Converted to {target.label}",
                 _format_paths(input_path, output_path),
             )
 
-        def _on_error(result):
-            message = result.stderr.strip() if result.stderr else "Conversion failed"
-            notify.notify_error(
-                f"Video conversion failed ({target.label})",
-                message,
-            )
+        def _on_error(message):
+            progress.close()
+            output.discard(output_path)
+            notify.notify_error(f"Video conversion failed ({target.label})", message)
 
-        commands.run_command_async(cmd, on_success=_on_success, on_error=_on_error)
+        commands.run_ffmpeg_async(
+            cmd,
+            duration,
+            on_progress=_on_progress,
+            on_success=_on_success,
+            on_error=_on_error,
+        )
 
 
 def _format_paths(input_path, output_path):
     return f"{os.path.basename(input_path)} -> {os.path.basename(output_path)}"
+
+
+def _format_time(seconds):
+    total_seconds = max(0, int(seconds))
+    minutes, secs = divmod(total_seconds, 60)
+    hours, minutes = divmod(minutes, 60)
+    if hours:
+        return f"{hours:d}:{minutes:02d}:{secs:02d}"
+    return f"{minutes:d}:{secs:02d}"
 
 
 _AUDIO_EXTENSIONS = {

@@ -1,6 +1,6 @@
 import os
 
-from nautilus_file_converter import commands, notify
+from nautilus_file_converter import commands, notify, output
 from nautilus_file_converter.converters.base import BaseConverter, ConversionTarget
 
 
@@ -26,8 +26,7 @@ class ImageConverter(BaseConverter):
         """Generate targets with quality variants for lossy formats."""
         result = []
         for base_target in self._base_targets:
-            variants = self.get_quality_variants(base_target)
-            result.extend(variants)
+            result.extend(self.get_quality_variants(base_target))
         return result
 
     def supports(self, file_info) -> bool:
@@ -49,6 +48,7 @@ class ImageConverter(BaseConverter):
     def convert(self, input_path, output_path, target):
         cmd = commands.build_magick_command(input_path, output_path, quality=target.quality)
         if not cmd:
+            output.discard(output_path)
             notify.notify_error(
                 "Image conversion failed",
                 "ImageMagick not found. Install magick or convert.",
@@ -61,12 +61,9 @@ class ImageConverter(BaseConverter):
                 _format_paths(input_path, output_path),
             )
 
-        def _on_error(result):
-            message = result.stderr.strip() if result.stderr else "Conversion failed"
-            notify.notify_error(
-                f"Image conversion failed ({target.label})",
-                message,
-            )
+        def _on_error(message):
+            output.discard(output_path)
+            notify.notify_error(f"Image conversion failed ({target.label})", message)
 
         commands.run_command_async(cmd, on_success=_on_success, on_error=_on_error)
 

@@ -128,6 +128,7 @@ def _on_strip_metadata_activate(menu_item, file_infos):
         output_path = output.build_suffixed_output_path(input_path, "stripped")
         cmd = commands.build_magick_strip_command(input_path, output_path)
         if not cmd:
+            output.discard(output_path)
             notify.notify_error(
                 "Metadata strip failed",
                 "ImageMagick not found. Install magick or convert.",
@@ -140,8 +141,8 @@ def _on_strip_metadata_activate(menu_item, file_infos):
                 _format_paths(input_path, output_path),
             )
 
-        def _on_error(result):
-            message = result.stderr.strip() if result.stderr else "Metadata stripping failed"
+        def _on_error(message, output_path=output_path):
+            output.discard(output_path)
             notify.notify_error("Metadata strip failed", message)
 
         commands.run_command_async(cmd, on_success=_on_success, on_error=_on_error)
